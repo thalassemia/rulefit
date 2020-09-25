@@ -21,8 +21,7 @@ from glmnet import glmnet
 from glmnet_python import cvglmnetCoef, cvglmnetPredict
 from functools import reduce
 import time
-import sys
-sys.stdout = open('C:/Users/cheah/rulefitOut.log', 'w')
+import lightgbm as lgb
 
 class RuleCondition():
     """Class for binary rule condition
@@ -174,8 +173,50 @@ def extract_rules_from_tree(tree, feature_names=None):
     """Helper to turn a tree into as set of rules
     """
     rules = set()
+    total_count = float(tree["internal_count"])
+    def traverse_nodes(curr_tree=tree, split_index=0,
+                       decision_type=None,
+                       threshold=None,
+                       feature=None,
+                       support = None,
+                       conditions=[]):
+        if split_index != 0:
+            if feature_names is not None:
+                feature_name = feature_names[feature]
+            else:
+                feature_name = feature
+            rule_condition = RuleCondition(feature_index=feature,
+                                           threshold=threshold,
+                                           operator=decision_type,
+                                           support = support,
+                                           feature_name=feature_name)
+            new_conditions = conditions + [rule_condition]
+        else:
+            new_conditions = []
+        ## if not terminal node
+        if "leaf_index" not in curr_tree:
+            feature = curr_tree["split_feature"]
+            threshold = curr_tree["threshold"]
+            support = curr_tree["internal_count"] / float(total_count)
+            
+            left_tree = curr_tree["left_child"]
+            traverse_nodes(left_tree, curr_tree["split_index"], "<=", threshold, feature, support, new_conditions)
 
-    def traverse_nodes(node_id=0,
+            right_tree = curr_tree["right_child"]
+            traverse_nodes(right_tree, curr_tree["split_index"], ">", threshold, feature, support, new_conditions)
+        else: # a leaf node
+            if len(new_conditions) > 0:
+                new_rule = Rule(new_conditions, curr_tree["value"])
+                rules.update([new_rule])
+            else:
+                pass # tree only has a root node!
+            return None
+    
+    traverse_nodes()
+
+    return rules        
+
+"""     def traverse_nodes(node_id=0,
                        operator=None,
                        threshold=None,
                        feature=None,
@@ -193,23 +234,6 @@ def extract_rules_from_tree(tree, feature_names=None):
             new_conditions = conditions + [rule_condition]
         else:
             new_conditions = []
-        """ ## if not terminal node
-        if tree.children_left[node_id] != tree.children_right[node_id]:
-            feature = tree.feature[node_id]
-            threshold = tree.threshold[node_id]
-
-            left_node_id = tree.children_left[node_id]
-            traverse_nodes(left_node_id, "<=", threshold, feature, new_conditions)
-
-            right_node_id = tree.children_right[node_id]
-            traverse_nodes(right_node_id, ">", threshold, feature, new_conditions)
-        else: # a leaf node
-            if len(new_conditions)>0:
-                new_rule = Rule(new_conditions,tree.value[node_id][0][0])
-                rules.update([new_rule])
-            else:
-                pass #tree only has a root node!
-            return None """
         ## if not terminal node
         if tree["is_leaf"][node_id] == False:
             feature = tree["feature_idx"][node_id]
@@ -217,19 +241,16 @@ def extract_rules_from_tree(tree, feature_names=None):
 
             left_node_id = tree["left"][node_id]
             traverse_nodes(left_node_id, "<=", threshold, feature, new_conditions)
-            rightnodeid = tree["right"][node_id]
-            traverse_nodes(rightnodeid, ">", threshold, feature, new_conditions)
+
+            right_node_id = tree["right"][node_id]
+            traverse_nodes(right_node_id, ">", threshold, feature, new_conditions)
         else: # a leaf node
             if len(new_conditions) > 0:
                 new_rule = Rule(new_conditions, tree["value"][node_id])
                 rules.update([new_rule])
             else:
                 pass # tree only has a root node!
-            return None
-
-    traverse_nodes()
-
-    return rules
+            return None """
 
 
 
@@ -267,7 +288,8 @@ class RuleEnsemble():
 
         """
         for tree in self.tree_list:
-            rules = extract_rules_from_tree(tree[0].nodes,feature_names=self.feature_names)
+            #rules = extract_rules_from_tree(tree[0].nodes,feature_names=self.feature_names)
+            rules = extract_rules_from_tree(tree['tree_structure'], feature_names = self.feature_names)
             self.rules.update(rules)
 
     def filter_rules(self, func):
@@ -408,20 +430,17 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 n_estimators_default=int(np.ceil(self.max_rules/self.tree_size))
                 self.sample_fract_=min(0.5,(100+6*np.sqrt(N))/N)
                 if   self.rfmode=='regress':
-                    self.tree_generator = HistGradientBoostingRegressor(max_iter=n_estimators_default,random_state=self.random_state,max_depth=self.max_depth)
+                    #self.tree_generator = HistGradientBoostingRegressor(max_iter=n_estimators_default,random_state=self.random_state,max_depth=self.max_depth)
+                    param = {'num_leaves': 31, 'objective': 'regression'}
                 else:
-                    self.tree_generator = HistGradientBoostingClassifier(max_iter=n_estimators_default,random_state=self.random_state,max_depth=self.max_depth)
-
-            if   self.rfmode=='regress':
-                if type(self.tree_generator) not in [HistGradientBoostingRegressor,RandomForestRegressor]:
-                    raise ValueError("RuleFit only works with RandomForest and BoostingRegressor")
-            else:
-                if type(self.tree_generator) not in [HistGradientBoostingClassifier,RandomForestClassifier]:
-                    raise ValueError("RuleFit only works with RandomForest and BoostingClassifier")
-
+                    #self.tree_generator = HistGradientBoostingClassifier(max_iter=n_estimators_default,random_state=self.random_state,max_depth=self.max_depth)
+                    param = {'num_leaves': 31, 'objective': 'multiclass', 'num_class': len(feature_names)}
+            
+            lgb.Dataset(X, label = y)
             ## fit tree generator
             if not self.exp_rand_tree_size: # simply fit with constant tree size
-                self.tree_generator.fit(X, y)
+                #self.tree_generator.fit(X, y)
+                self.trained_trees = lgb.train(X, y, n_estimators_default)
             else: # randomise tree size as per Friedman 2005 Sec 3.3
                 np.random.seed(self.random_state)
                 tree_sizes=np.random.exponential(scale=self.tree_size-2,size=int(np.ceil(self.max_rules*2/self.tree_size)))
@@ -442,7 +461,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
                     self.tree_generator.fit(np.copy(X, order='C'), np.copy(y, order='C'))
                     curr_est_=curr_est_+1
                 self.tree_generator.set_params(warm_start=False)
-            tree_list = self.tree_generator._predictors
+            #tree_list = self.tree_generator._predictors
+            tree_list = self.trained_trees.dump_model()['tree_info']
             if isinstance(self.tree_generator, RandomForestRegressor) or isinstance(self.tree_generator, RandomForestClassifier):
                  tree_list = [[x] for x in self.tree_generator.estimators_]
             print(f"Finished generating tree ensemble in {time.time() - start}s")
