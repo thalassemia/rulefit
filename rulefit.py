@@ -16,10 +16,7 @@ from sklearn.base import BaseEstimator
 from sklearn.base import TransformerMixin
 from sklearn.experimental import enable_hist_gradient_boosting
 from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier, RandomForestRegressor, RandomForestClassifier
-#import glmnet_python
-#from glmnet_python import cvglmnet, cvglmnetCoef, cvglmnetPredict
 from glmnet import LogitNet, ElasticNet
-from sklearn.linear_model import LogisticRegressionCV, LassoCV
 from functools import reduce
 import time
 
@@ -331,9 +328,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
     """
     def __init__(
             self,
-            tree_size=4,
+            tree_size=31,
             sample_fract='default',
-            max_rules=2000,
             memory_par=0.1,
             tree_generator=None,
             rfmode='regress',
@@ -358,7 +354,6 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.stddev = None
         self.mean = None
         self.exp_rand_tree_size=exp_rand_tree_size
-        self.max_rules=max_rules
         self.sample_fract=sample_fract
         self.max_rules=max_rules
         self.memory_par=memory_par
@@ -388,8 +383,6 @@ class RuleFit(BaseEstimator, TransformerMixin):
         if 'r' in self.model_type:
             ## initialise tree generator
             if self.tree_generator is None:
-                n_estimators_default=int(np.ceil(self.max_rules/self.tree_size))
-                self.sample_fract_=min(0.5,(100+6*np.sqrt(N))/N)
                 if   self.rfmode=='regress':
                     self.tree_generator = HistGradientBoostingRegressor(max_iter=self.max_trees,max_leaf_nodes=self.tree_size,random_state=self.random_state,max_depth=self.max_depth,learning_rate=self.memory_par)
                 else:
@@ -421,18 +414,13 @@ class RuleFit(BaseEstimator, TransformerMixin):
             tree_list = self.tree_generator._predictors
             if isinstance(self.tree_generator, RandomForestRegressor) or isinstance(self.tree_generator, RandomForestClassifier):
                  tree_list = [[x] for x in self.tree_generator.estimators_]
-            #print(f"Finished generating tree ensemble in {time.time() - start}s")
-            start = time.time()
 
             ## extract rules
             self.rule_ensemble = RuleEnsemble(tree_list = tree_list,
                                               feature_names=self.feature_names)
-            #print(f"Finished extracting rules in {time.time() - start}s")
-            start = time.time()
             ## concatenate original features and rules
             X_rules = self.rule_ensemble.transform(X)
-            #print(f"Finished concatenating all rules in {time.time() - start}s")
-            start = time.time()
+
         ## standardise linear variables if requested (for regression model only)
         if 'l' in self.model_type:
 
@@ -455,8 +443,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
         if 'r' in self.model_type:
             if X_rules.shape[0] >0:
                 X_concat = np.concatenate((X_concat, X_rules), axis=1)
-        print(f"Finished tree stuff in {time.time() - start}")
-        #print("Starting linear model fitting")
+        print(f"Finished tree stuff in {time.time() - start} seconds")
+        
+        start = time.time()
         ## fit Lasso
         y = np.float64(y)
         if self.rfmode=='regress':
@@ -465,35 +454,19 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 alphas=None
             elif hasattr(self.Cs, "__len__"):
                 n_alphas= None
-                alphas=1./self.Cs
+                alphas=self.Cs
             else:
                 n_alphas= self.Cs
                 alphas=None
-            """ self.lscv = LassoCV(
-                n_alphas=n_alphas, alphas=alphas, cv=self.cv,
-                max_iter=self.max_iter, tol=self.tol,
-                n_jobs=self.n_jobs,
-                random_state=self.random_state)
-            self.lscv.fit(X_concat, y)
-            self.coef_=self.lscv.coef_
-            self.intercept_=self.lscv.intercept_ """
             self.lscv=ElasticNet(
-                n_splits=self.cv, max_iter=100000, cut_point=0,
+                n_lambda=n_alphas, alphas = alphas, n_splits=self.cv, max_iter=100000, cut_point=0,
                 tol=1e-7, n_jobs=self.n_jobs,
                 random_state=self.random_state, verbose = False)
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_
-            #self.lscv = cvglmnet(x = X_concat, y = y, family = "gaussian", nfolds = self.cv, parallel = self.n_jobs)
         else:
             Cs=10 if self.Cs is None else self.Cs
-            """ self.lscv=LogisticRegressionCV(
-                Cs=Cs, cv=self.cv, penalty='l1', max_iter=self.max_iter,
-                tol=self.tol, n_jobs=self.n_jobs,
-                random_state=self.random_state, solver='saga')
-            self.lscv.fit(X_concat, y)
-            self.coef_=self.lscv.coef_[0]
-            self.intercept_=self.lscv.intercept_[0] """
             self.lscv=LogitNet(
                 n_splits=self.cv, max_iter=100000, cut_point=0,
                 tol=1e-7, n_jobs=self.n_jobs,
@@ -502,11 +475,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_
-            #self.lscv = cvglmnet(x = X_concat, y = y, family = "binomial", nfolds = self.cv, parallel = self.n_jobs)
-        #allcoefs = cvglmnetCoef(self.lscv, s = "lambda_min")
-        #self.coef_ = allcoefs[1:]
-        #self.intercept_ = allcoefs[0]
-        #print(f"Finished fitting CV linear model in {time.time() - start}s")
+        print(f"Finished fitting CV linear model in {time.time() - start} seconds")
 
         return self
 
@@ -527,7 +496,6 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 if X_rules.shape[0] >0:
                     X_concat = np.concatenate((X_concat, X_rules), axis=1)
         return self.lscv.predict(X_concat)
-        #return cvglmnetPredict(self.lscv, X_concat, s = "lambda_min", ptype = "link")
 
     def predict_proba(self, X):
         """Predict outcome probability for X, if model type supports probability prediction method
@@ -555,7 +523,6 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 if X_rules.shape[0] >0:
                     X_concat = np.concatenate((X_concat, X_rules), axis=1)
         return self.lscv.predict_proba(X_concat)
-        #return cvglmnetPredict(self.lscv, X_concat, s = "lambda_min", ptype = "response")
 
     def transform(self, X=None, y=None):
         """Transform dataset.
