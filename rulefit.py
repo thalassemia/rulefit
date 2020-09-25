@@ -16,12 +16,12 @@ from sklearn.base import BaseEstimator
 from sklearn.base import TransformerMixin
 from sklearn.experimental import enable_hist_gradient_boosting
 from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier, RandomForestRegressor, RandomForestClassifier
-import glmnet_python
-from glmnet import glmnet
-from glmnet_python import cvglmnetCoef, cvglmnetPredict
+#import glmnet_python
+#from glmnet_python import cvglmnet, cvglmnetCoef, cvglmnetPredict
+from glmnet import LogitNet, ElasticNet
+from sklearn.linear_model import LogisticRegressionCV, LassoCV
 from functools import reduce
 import time
-import lightgbm as lgb
 
 class RuleCondition():
     """Class for binary rule condition
@@ -173,50 +173,7 @@ def extract_rules_from_tree(tree, feature_names=None):
     """Helper to turn a tree into as set of rules
     """
     rules = set()
-    total_count = float(tree["internal_count"])
-    def traverse_nodes(curr_tree=tree, split_index=0,
-                       decision_type=None,
-                       threshold=None,
-                       feature=None,
-                       support = None,
-                       conditions=[]):
-        if split_index != 0:
-            if feature_names is not None:
-                feature_name = feature_names[feature]
-            else:
-                feature_name = feature
-            rule_condition = RuleCondition(feature_index=feature,
-                                           threshold=threshold,
-                                           operator=decision_type,
-                                           support = support,
-                                           feature_name=feature_name)
-            new_conditions = conditions + [rule_condition]
-        else:
-            new_conditions = []
-        ## if not terminal node
-        if "leaf_index" not in curr_tree:
-            feature = curr_tree["split_feature"]
-            threshold = curr_tree["threshold"]
-            support = curr_tree["internal_count"] / float(total_count)
-            
-            left_tree = curr_tree["left_child"]
-            traverse_nodes(left_tree, curr_tree["split_index"], "<=", threshold, feature, support, new_conditions)
-
-            right_tree = curr_tree["right_child"]
-            traverse_nodes(right_tree, curr_tree["split_index"], ">", threshold, feature, support, new_conditions)
-        else: # a leaf node
-            if len(new_conditions) > 0:
-                new_rule = Rule(new_conditions, curr_tree["value"])
-                rules.update([new_rule])
-            else:
-                pass # tree only has a root node!
-            return None
-    
-    traverse_nodes()
-
-    return rules        
-
-"""     def traverse_nodes(node_id=0,
+    def traverse_nodes(node_id=0,
                        operator=None,
                        threshold=None,
                        feature=None,
@@ -250,8 +207,11 @@ def extract_rules_from_tree(tree, feature_names=None):
                 rules.update([new_rule])
             else:
                 pass # tree only has a root node!
-            return None """
+            return None
 
+    traverse_nodes()
+
+    return rules        
 
 
 class RuleEnsemble():
@@ -288,8 +248,7 @@ class RuleEnsemble():
 
         """
         for tree in self.tree_list:
-            #rules = extract_rules_from_tree(tree[0].nodes,feature_names=self.feature_names)
-            rules = extract_rules_from_tree(tree['tree_structure'], feature_names = self.feature_names)
+            rules = extract_rules_from_tree(tree[0].nodes,feature_names=self.feature_names)
             self.rules.update(rules)
 
     def filter_rules(self, func):
@@ -318,7 +277,7 @@ class RuleEnsemble():
         else: # else use the coefs to filter the rules we bother to interpret
             res= np.array([rule_list[i_rule].transform(X) for i_rule in np.arange(len(rule_list)) if coefs[i_rule]!=0]).T
             res_=np.zeros([X.shape[0],len(rule_list)])
-            res_[:,coefs!=0]=res
+            res_[:,(coefs!=0).flatten()]=res
             return res_
     def __str__(self):
         return (map(lambda x: x.__str__(), self.rules)).__str__()
@@ -388,7 +347,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
             max_iter=None,
             n_jobs=None,
             random_state=None,
-            max_depth=3):
+            max_depth=3,
+            max_trees=100):
         self.tree_generator = tree_generator
         self.rfmode=rfmode
         self.lin_trim_quantile=lin_trim_quantile
@@ -412,6 +372,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.n_jobs=n_jobs
         self.Cs=Cs
         self.max_depth = max_depth
+        self.max_trees = max_trees
 
     def fit(self, X, y=None, feature_names=None):
         """Fit and estimate linear combination of rule ensemble
@@ -430,17 +391,13 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 n_estimators_default=int(np.ceil(self.max_rules/self.tree_size))
                 self.sample_fract_=min(0.5,(100+6*np.sqrt(N))/N)
                 if   self.rfmode=='regress':
-                    #self.tree_generator = HistGradientBoostingRegressor(max_iter=n_estimators_default,random_state=self.random_state,max_depth=self.max_depth)
-                    param = {'num_leaves': 31, 'objective': 'regression'}
+                    self.tree_generator = HistGradientBoostingRegressor(max_iter=self.max_trees,max_leaf_nodes=self.tree_size,random_state=self.random_state,max_depth=self.max_depth,learning_rate=self.memory_par)
                 else:
-                    #self.tree_generator = HistGradientBoostingClassifier(max_iter=n_estimators_default,random_state=self.random_state,max_depth=self.max_depth)
-                    param = {'num_leaves': 31, 'objective': 'multiclass', 'num_class': len(feature_names)}
+                    self.tree_generator = HistGradientBoostingClassifier(max_iter=self.max_trees,max_leaf_nodes=self.tree_size,random_state=self.random_state,max_depth=self.max_depth,learning_rate=self.memory_par)
             
-            lgb.Dataset(X, label = y)
             ## fit tree generator
             if not self.exp_rand_tree_size: # simply fit with constant tree size
-                #self.tree_generator.fit(X, y)
-                self.trained_trees = lgb.train(X, y, n_estimators_default)
+                self.tree_generator.fit(X, y)
             else: # randomise tree size as per Friedman 2005 Sec 3.3
                 np.random.seed(self.random_state)
                 tree_sizes=np.random.exponential(scale=self.tree_size-2,size=int(np.ceil(self.max_rules*2/self.tree_size)))
@@ -461,21 +418,20 @@ class RuleFit(BaseEstimator, TransformerMixin):
                     self.tree_generator.fit(np.copy(X, order='C'), np.copy(y, order='C'))
                     curr_est_=curr_est_+1
                 self.tree_generator.set_params(warm_start=False)
-            #tree_list = self.tree_generator._predictors
-            tree_list = self.trained_trees.dump_model()['tree_info']
+            tree_list = self.tree_generator._predictors
             if isinstance(self.tree_generator, RandomForestRegressor) or isinstance(self.tree_generator, RandomForestClassifier):
                  tree_list = [[x] for x in self.tree_generator.estimators_]
-            print(f"Finished generating tree ensemble in {time.time() - start}s")
+            #print(f"Finished generating tree ensemble in {time.time() - start}s")
             start = time.time()
 
             ## extract rules
             self.rule_ensemble = RuleEnsemble(tree_list = tree_list,
                                               feature_names=self.feature_names)
-            print(f"Finished extracting rules in {time.time() - start}s")
+            #print(f"Finished extracting rules in {time.time() - start}s")
             start = time.time()
             ## concatenate original features and rules
             X_rules = self.rule_ensemble.transform(X)
-            print(f"Finished concatenating all rules in {time.time() - start}s")
+            #print(f"Finished concatenating all rules in {time.time() - start}s")
             start = time.time()
         ## standardise linear variables if requested (for regression model only)
         if 'l' in self.model_type:
@@ -499,7 +455,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
         if 'r' in self.model_type:
             if X_rules.shape[0] >0:
                 X_concat = np.concatenate((X_concat, X_rules), axis=1)
-
+        print(f"Finished tree stuff in {time.time() - start}")
+        #print("Starting linear model fitting")
         ## fit Lasso
         y = np.float64(y)
         if self.rfmode=='regress':
@@ -520,7 +477,14 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_
             self.intercept_=self.lscv.intercept_ """
-            self.lscv = cvglmnet(X_concat, y, family = "gaussian", nfolds = self.cv, parallel = self.n_jobs)
+            self.lscv=ElasticNet(
+                n_splits=self.cv, max_iter=100000, cut_point=0,
+                tol=1e-7, n_jobs=self.n_jobs,
+                random_state=self.random_state, verbose = False)
+            self.lscv.fit(X_concat, y)
+            self.coef_=self.lscv.coef_[0]
+            self.intercept_=self.lscv.intercept_
+            #self.lscv = cvglmnet(x = X_concat, y = y, family = "gaussian", nfolds = self.cv, parallel = self.n_jobs)
         else:
             Cs=10 if self.Cs is None else self.Cs
             """ self.lscv=LogisticRegressionCV(
@@ -530,11 +494,19 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_[0] """
-            self.lscv = cvglmnet(X_concat, y, famiy = "binomial", nfolds = self.cv, parallel = self.n_jobs)
-        allcoefs = cvglmnetCoef(self.lscv, s = "lambda_min")
-        self.coef_ = allcoefs[1:]
-        self.intercept_ = allcoefs[0]
-        print(f"Finished fitting CV linear model in {time.time() - start}s")
+            self.lscv=LogitNet(
+                n_splits=self.cv, max_iter=100000, cut_point=0,
+                tol=1e-7, n_jobs=self.n_jobs,
+                random_state=self.random_state, verbose = False)
+            print(self.tree_generator)
+            self.lscv.fit(X_concat, y)
+            self.coef_=self.lscv.coef_[0]
+            self.intercept_=self.lscv.intercept_
+            #self.lscv = cvglmnet(x = X_concat, y = y, family = "binomial", nfolds = self.cv, parallel = self.n_jobs)
+        #allcoefs = cvglmnetCoef(self.lscv, s = "lambda_min")
+        #self.coef_ = allcoefs[1:]
+        #self.intercept_ = allcoefs[0]
+        #print(f"Finished fitting CV linear model in {time.time() - start}s")
 
         return self
 
@@ -554,7 +526,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 X_rules = self.rule_ensemble.transform(X,coefs=rule_coefs)
                 if X_rules.shape[0] >0:
                     X_concat = np.concatenate((X_concat, X_rules), axis=1)
-        return cvglmnetPredict(self.lscv, X_concat, s = "lambda_min", type = "link")
+        return self.lscv.predict(X_concat)
+        #return cvglmnetPredict(self.lscv, X_concat, s = "lambda_min", ptype = "link")
 
     def predict_proba(self, X):
         """Predict outcome probability for X, if model type supports probability prediction method
@@ -581,7 +554,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 X_rules = self.rule_ensemble.transform(X,coefs=rule_coefs)
                 if X_rules.shape[0] >0:
                     X_concat = np.concatenate((X_concat, X_rules), axis=1)
-        return cvglmnetPredict(self.lscv, X_concat, s = "lambda_min", type = "response")
+        return self.lscv.predict_proba(X_concat)
+        #return cvglmnetPredict(self.lscv, X_concat, s = "lambda_min", ptype = "response")
 
     def transform(self, X=None, y=None):
         """Transform dataset.
@@ -647,5 +621,5 @@ class RuleFit(BaseEstimator, TransformerMixin):
             output_rules += [(rule.__str__(), 'rule', coef,  rule.support, importance)]
         rules = pd.DataFrame(output_rules, columns=["rule", "type","coef", "support", "importance"])
         if exclude_zero_coef:
-            rules = rules.ix[rules.coef != 0]
+            rules = rules[rules.coef != 0]
         return rules
