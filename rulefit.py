@@ -329,7 +329,6 @@ class RuleFit(BaseEstimator, TransformerMixin):
     def __init__(
             self,
             tree_size=31,
-            sample_fract='default',
             memory_par=0.1,
             tree_generator=None,
             rfmode='regress',
@@ -340,7 +339,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             Cs=None,
             cv=3,
             tol=0.0001,
-            max_iter=None,
+            max_iter=100000,
             n_jobs=None,
             random_state=None,
             max_depth=3,
@@ -362,8 +361,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.model_type=model_type
         self.cv=cv
         self.tol=tol
-        # LassoCV default max_iter is 1000 while LogisticRegressionCV 100.
-        self.max_iter=1000 if 'regress' else 100
+        self.max_iter=max_iter
         self.n_jobs=n_jobs
         self.Cs=Cs
         self.max_depth = max_depth
